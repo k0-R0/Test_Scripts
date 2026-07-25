@@ -6,7 +6,7 @@ Features:
 1. Aggregates Embedded, Firmware, C/C++, and Linux Systems jobs from multiple APIs.
 2. Filters by skillset keywords extracted from Prayush B Menon's portfolio.
 3. Connects to Google Sheets via `gspread` (Service Account JSON) to deduplicate and log jobs.
-4. Sends Telegram notifications with new job count, top matches, and a direct Google Sheets link.
+4. Sends Telegram notifications with run status, job count, top matches, and a direct Google Sheets link.
 """
 
 import json
@@ -166,7 +166,6 @@ def fetch_hn_jobs():
 
 
 def get_google_sheet_client():
-    """Initializes gspread client using Service Account JSON from env var or local file."""
     if not GSPREAD_AVAILABLE:
         print("Warning: gspread/google-auth not installed. Google Sheets update disabled.")
         return None
@@ -208,7 +207,6 @@ def update_google_sheet(sheet_id, worksheet_name, matched_jobs):
         except gspread.exceptions.WorksheetNotFound:
             worksheet = sh.add_worksheet(title=worksheet_name, rows=1000, cols=10)
 
-        # Check existing values
         existing_data = worksheet.get_all_values()
         headers = ["Date Added", "Source", "Job Title", "Company", "Location", "Match Score", "Matched Keywords", "Link", "Status"]
 
@@ -216,7 +214,6 @@ def update_google_sheet(sheet_id, worksheet_name, matched_jobs):
             worksheet.append_row(headers)
             existing_links = set()
         else:
-            # Find column index for Link (usually column index 7)
             header_row = existing_data[0]
             link_col_idx = 7
             if "Link" in header_row:
@@ -250,22 +247,31 @@ def update_google_sheet(sheet_id, worksheet_name, matched_jobs):
         return 0, set()
 
 
-def send_telegram_alert(bot_token, chat_id, new_jobs_count, top_jobs, sheet_id):
+def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top_jobs, sheet_id):
     if not bot_token or bot_token == "YOUR_TELEGRAM_BOT_TOKEN":
         print("Telegram bot token not configured. Skipping notification.")
         return
 
-    msg = f"🔍 *Embedded Job Search Summary*\n"
-    msg += f"Found *{new_jobs_count}* new matching jobs for your profile!\n\n"
-    msg += "*Top Matching Roles:*\n"
-
-    for i, job in enumerate(top_jobs[:5], 1):
-        msg += f"{i}. [{job['title']}]({job['link']}) @ *{job['company']}*\n"
-        msg += f"   📍 {job['location']} | Match Score: `{job['score']}`\n"
-
     sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}" if sheet_id and sheet_id != "YOUR_SPREADSHEET_ID_HERE" else ""
-    if sheet_url:
-        msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
+
+    if new_jobs_count > 0:
+        msg = f"🔍 *Embedded Job Search Alert*\n"
+        msg += f"Scanned *{total_raw_count}* postings across APIs.\n"
+        msg += f"Found *{new_jobs_count}* new matching jobs for your profile!\n\n"
+        msg += "*Top Matching Roles:*\n"
+
+        for i, job in enumerate(top_jobs[:5], 1):
+            msg += f"{i}. [{job['title']}]({job['link']}) @ *{job['company']}*\n"
+            msg += f"   📍 {job['location']} | Match Score: `{job['score']}`\n"
+
+        if sheet_url:
+            msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
+    else:
+        msg = f"✅ *Job Search Execution Complete*\n"
+        msg += f"Scanned *{total_raw_count}* postings across APIs.\n"
+        msg += f"No new Embedded/Linux/Systems jobs matched this batch. Your tracker is up to date!\n"
+        if sheet_url:
+            msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = json.dumps({
@@ -292,7 +298,6 @@ def send_telegram_alert(bot_token, chat_id, new_jobs_count, top_jobs, sheet_id):
 def main():
     config = load_config()
 
-    # Environment variables override config.json
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", config.get("telegram", {}).get("bot_token"))
     telegram_chat = os.environ.get("TELEGRAM_CHAT_ID", config.get("telegram", {}).get("chat_id"))
     sheet_id = os.environ.get("SPREADSHEET_ID", config.get("google_sheets", {}).get("spreadsheet_id"))
@@ -307,7 +312,8 @@ def main():
     raw_jobs.extend(fetch_remotive_jobs())
     raw_jobs.extend(fetch_hn_jobs())
 
-    print(f"Total raw jobs fetched: {len(raw_jobs)}")
+    total_raw_count = len(raw_jobs)
+    print(f"Total raw jobs fetched: {total_raw_count}")
 
     # 2. Filter & score
     matched_jobs = []
@@ -315,8 +321,7 @@ def main():
         link = j["link"].strip()
 
         score, matches = calculate_match_score(j["title"], j["full_text"], inc_kw, exc_kw)
-        has_title_match = any("Title:" in m for m in matches)
-        if score >= 25 or has_title_match:
+        if score >= 10:  # Include match score threshold
             job_entry = {
                 "Date Added": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "Source": j["source"],
@@ -331,20 +336,18 @@ def main():
             matched_jobs.append(job_entry)
 
     matched_jobs.sort(key=lambda x: x["Match Score"], reverse=True)
-    print(f"High-relevance roles filtered: {len(matched_jobs)}")
+    print(f"Matching embedded/systems roles filtered: {len(matched_jobs)}")
 
     # 3. Update Google Sheet
     added_count = 0
     if sheet_id and sheet_id != "YOUR_SPREADSHEET_ID_HERE":
         added_count, _ = update_google_sheet(sheet_id, worksheet_name, matched_jobs)
     else:
-        print("Notice: SPREADSHEET_ID not set. Printing top matches locally:")
-        for idx, job in enumerate(matched_jobs[:5], 1):
-            print(f"{idx}. [{job['Match Score']} pts] {job['Job Title']} @ {job['Company']} ({job['Link']})")
+        print("Notice: SPREADSHEET_ID not set in env or config.")
         added_count = len(matched_jobs)
 
-    # 4. Telegram Alert
-    if added_count > 0 and telegram_token and telegram_token != "YOUR_TELEGRAM_BOT_TOKEN":
+    # 4. Telegram Alert (Always send ping so user gets execution feedback!)
+    if telegram_token and telegram_token != "YOUR_TELEGRAM_BOT_TOKEN":
         top_jobs = [
             {
                 "title": j["Job Title"],
@@ -358,6 +361,7 @@ def main():
         send_telegram_alert(
             telegram_token,
             telegram_chat,
+            total_raw_count,
             added_count,
             top_jobs,
             sheet_id
