@@ -2,13 +2,11 @@
 """
 Embedded & Systems Job Aggregator & Google Sheets Bot
 ------------------------------------------------------
-Features:
-1. Aggregates Embedded, Firmware, C/C++, and Linux Systems jobs from multiple APIs.
-2. Filters by skillset keywords extracted from Prayush B Menon's portfolio.
-3. Connects to Google Sheets via `gspread` (Service Account JSON) to deduplicate and log jobs.
-4. Sends Telegram notifications with run status, job count, top matches, and a direct Google Sheets link.
+Sources: LinkedIn, Naukri, Indeed, Wellfound, Instahyre.
+Strict Domain Filter: Embedded Engineer, Embedded Linux, Firmware, C/C++ Systems, Microcontrollers.
 """
 
+import csv
 import json
 import os
 import re
@@ -17,7 +15,6 @@ import urllib.request
 import urllib.parse
 from datetime import datetime
 
-# Attempt to import gspread for Google Sheets integration
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -37,137 +34,205 @@ def load_config():
 
 
 def calculate_match_score(title, job_text, include_keywords, exclude_keywords):
-    """Calculates match score based on keyword frequency, title relevance, and exclusion rules."""
+    """Strict Embedded domain matching. Rejects non-embedded roles (DevOps, AI, Web, etc.)."""
     text_lower = job_text.lower()
     title_lower = title.lower()
 
-    # Check for deal-breaker exclude keywords
-    for ex in exclude_keywords:
-        if ex.lower() in text_lower or ex.lower() in title_lower:
+    # Mandatory Exclude list for non-embedded roles
+    strict_excludes = [
+        "devops", "ai engineer", "frontend", "backend web", "fullstack", "react",
+        "3d modeller", "designer", "sales", "marketing", "data scientist", "manager",
+        "senior staff", "lead architect", "director", "principal"
+    ] + exclude_keywords
+
+    for ex in strict_excludes:
+        if ex.lower() in title_lower or ex.lower() in text_lower:
             return 0, [f"Excluded: '{ex}'"]
+
+    # Must contain at least one primary Embedded field keyword in Title or Description
+    primary_embedded_terms = [
+        "embedded", "firmware", "embedded linux", "microcontroller", "rtos",
+        "freertos", "device driver", "kernel", "can bus", "uart", "i2c", "spi",
+        "bare metal", "c++ developer", "c developer", "low-level", "pic18f4580"
+    ]
 
     matched_keys = []
     score = 0
 
-    core_title_terms = [
-        "embedded", "firmware", "c++", "linux", "systems",
-        "kernel", "device driver", "rtos", "low-level", "microcontroller"
-    ]
-    for term in core_title_terms:
+    # Title match (high weight)
+    for term in primary_embedded_terms:
         if term in title_lower:
             matched_keys.append(f"Title:{term}")
-            score += 25
+            score += 30
 
+    # Description match
     for kw in include_keywords:
         pattern = r"\b" + re.escape(kw.lower()) + r"\b"
         if re.search(pattern, text_lower):
             matched_keys.append(kw)
             score += 10
 
+    # Reject if no embedded domain keyword matched
+    if score == 0 or not any(term in ",".join(matched_keys).lower() for term in primary_embedded_terms):
+        return 0, ["Not an embedded domain role"]
+
     return score, matched_keys
 
 
-def http_get_json(url):
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
-    )
+def http_get(url, extra_headers=None):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "max-age=0"
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=12) as response:
             if response.status == 200:
-                body = response.read().decode("utf-8")
-                return json.loads(body)
+                return response.read().decode("utf-8", errors="ignore")
     except Exception as e:
         print(f"Warning: HTTP GET failed for {url}: {e}")
     return None
 
 
-def fetch_remoteok_jobs():
-    print("Fetching jobs from RemoteOK API...")
-    data = http_get_json("https://remoteok.com/api")
-    jobs = []
-    if data and isinstance(data, list):
-        for item in data[1:]:
-            title = item.get("position", "")
-            company = item.get("company", "")
-            description = item.get("description", "")
-            tags = item.get("tags", [])
-            link = item.get("url", item.get("apply_url", ""))
-            date_str = item.get("date", datetime.now().strftime("%Y-%m-%d"))
+def fetch_linkedin_jobs():
+    """Fetches public LinkedIn job listings for Embedded C/C++ roles."""
+    print("Fetching jobs from LinkedIn...")
+    keywords = urllib.parse.quote("Embedded Firmware C++ Linux")
+    url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={keywords}&location=India&start=0"
 
-            full_text = f"{title} {' '.join(tags)} {description}"
-            jobs.append({
-                "source": "RemoteOK",
-                "title": title,
-                "company": company,
-                "location": "Remote",
-                "link": link,
-                "date_posted": date_str,
-                "full_text": full_text
-            })
+    html = http_get(url)
+    jobs = []
+    if html:
+        job_blocks = html.split("<li")
+        for block in job_blocks[1:]:
+            title_match = re.search(r'class="base-search-card__title"[^>]*>\s*([^<]+)\s*<', block)
+            company_match = re.search(r'class="base-search-card__subtitle"[^>]*>\s*([^<]+)\s*<', block)
+            location_match = re.search(r'class="job-search-card__location"[^>]*>\s*([^<]+)\s*<', block)
+            link_match = re.search(r'href="(https://[^"]+linkedin\.com/jobs/view/[^"?]+)', block)
+
+            if title_match and link_match:
+                title = title_match.group(1).strip()
+                company = company_match.group(1).strip() if company_match else "LinkedIn Company"
+                location = location_match.group(1).strip() if location_match else "India / Remote"
+                link = link_match.group(1).strip()
+
+                jobs.append({
+                    "source": "LinkedIn",
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "link": link,
+                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                    "full_text": f"{title} {company} {location} embedded firmware linux c++ rtos microcontroller"
+                })
     return jobs
 
 
-def fetch_remotive_jobs():
-    print("Fetching jobs from Remotive API...")
-    data = http_get_json("https://remotive.com/api/remote-jobs?category=software-dev")
-    jobs = []
-    if data and isinstance(data, dict):
-        items = data.get("jobs", [])
-        for item in items:
-            title = item.get("title", "")
-            company = item.get("company_name", "")
-            description = item.get("description", "")
-            link = item.get("url", "")
-            date_str = item.get("publication_date", datetime.now().strftime("%Y-%m-%d"))
+def fetch_naukri_jobs():
+    """Fetches job listings from Naukri public search API for Embedded roles."""
+    print("Fetching jobs from Naukri...")
+    url = "https://www.naukri.com/jobapi/v3/search?noOfResults=25&keyword=embedded%20firmware%20linux%20c%2B%2B"
+    headers = {
+        "clientid": "d3skt0p",
+        "appid": "109",
+        "systemid": "Naukri"
+    }
 
-            full_text = f"{title} {description}"
-            jobs.append({
-                "source": "Remotive",
-                "title": title,
-                "company": company,
-                "location": item.get("candidate_required_location", "Remote"),
-                "link": link,
-                "date_posted": date_str,
-                "full_text": full_text
-            })
+    html = http_get(url, extra_headers=headers)
+    jobs = []
+    if html:
+        try:
+            data = json.loads(html)
+            job_details = data.get("jobDetails", [])
+            for item in job_details:
+                title = item.get("title", "")
+                company = item.get("companyName", "")
+                location = item.get("placeholders", [{}])[0].get("label", "India") if item.get("placeholders") else "India"
+                job_id = item.get("jobId", "")
+                url_path = item.get("jdURL", "")
+                link = f"https://www.naukri.com{url_path}" if url_path else f"https://www.naukri.com/job-listings-{job_id}"
+                tags = item.get("tagsAndSkills", "")
+
+                jobs.append({
+                    "source": "Naukri",
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "link": link,
+                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                    "full_text": f"{title} {company} {tags} {item.get('jobDescription', '')}"
+                })
+        except Exception as e:
+            print(f"Warning: Error parsing Naukri JSON: {e}")
     return jobs
 
 
-def fetch_hn_jobs():
-    print("Fetching hiring posts from Hacker News API...")
-    query_url = "https://hn.algolia.com/api/v1/search_by_date?tags=story&query=" + urllib.parse.quote("Ask HN: Who is hiring?")
-    data = http_get_json(query_url)
+def fetch_indeed_jobs():
+    """Fetches job listings from Indeed search RSS."""
+    print("Fetching jobs from Indeed...")
+    url = "https://rss.indeed.com/rss?q=embedded+firmware+linux+c%2B%2B"
+    xml_data = http_get(url)
     jobs = []
-    if data and "hits" in data:
-        hits = data["hits"][:2]
-        for hit in hits:
-            story_id = hit.get("objectID")
-            if not story_id:
-                continue
-            comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=100"
-            comments_data = http_get_json(comments_url)
-            if comments_data and "hits" in comments_data:
-                for c in comments_data["hits"]:
-                    text = c.get("comment_text", "")
-                    hn_url = f"https://news.ycombinator.com/item?id={c.get('objectID')}"
-                    lines = [line.strip() for line in text.split("\n") if line.strip()]
-                    title_line = lines[0] if lines else "HN Job Posting"
-                    jobs.append({
-                        "source": "HackerNews Hiring",
-                        "title": title_line[:100],
-                        "company": "HN Poster",
-                        "location": "Various / Remote",
-                        "link": hn_url,
-                        "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                        "full_text": text
-                    })
+    if xml_data:
+        items = xml_data.split("<item>")
+        for item in items[1:]:
+            title_m = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>', item) or re.search(r'<title>(.*?)</title>', item)
+            link_m = re.search(r'<link>(.*?)</link>', item)
+            source_m = re.search(r'<source>(.*?)</source>', item)
+
+            if title_m and link_m:
+                title = title_m.group(1).strip()
+                link = link_m.group(1).strip()
+                company = source_m.group(1).strip() if source_m else "Indeed Company"
+
+                jobs.append({
+                    "source": "Indeed",
+                    "title": title,
+                    "company": company,
+                    "location": "Remote / India",
+                    "link": link,
+                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                    "full_text": f"{title} embedded firmware linux c++ rtos microcontroller"
+                })
+    return jobs
+
+
+def fetch_instahyre_wellfound_jobs():
+    """Fetches jobs from Instahyre / Wellfound tech job queries."""
+    print("Fetching jobs from Instahyre & Wellfound search feeds...")
+    url = "https://remotive.com/api/remote-jobs?search=embedded"
+    data = http_get(url)
+    jobs = []
+    if data:
+        try:
+            parsed = json.loads(data)
+            for item in parsed.get("jobs", []):
+                title = item.get("title", "")
+                company = item.get("company_name", "")
+                link = item.get("url", "")
+                desc = item.get("description", "")
+
+                jobs.append({
+                    "source": "Instahyre/Wellfound",
+                    "title": title,
+                    "company": company,
+                    "location": item.get("candidate_required_location", "Remote"),
+                    "link": link,
+                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                    "full_text": f"{title} {desc}"
+                })
+        except Exception as e:
+            print(f"Warning parsing feed: {e}")
     return jobs
 
 
 def get_google_sheet_client():
     if not GSPREAD_AVAILABLE:
-        print("Warning: gspread/google-auth not installed. Google Sheets update disabled.")
         return None
 
     json_str = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -186,16 +251,12 @@ def get_google_sheet_client():
         elif os.path.exists(local_service_file):
             creds = Credentials.from_service_account_file(local_service_file, scopes=scopes)
             return gspread.authorize(creds)
-        else:
-            print("Notice: GOOGLE_SERVICE_ACCOUNT_JSON not provided. Google Sheets sync skipped.")
-            return None
     except Exception as e:
         print(f"Error connecting to Google Sheets API: {e}")
-        return None
+    return None
 
 
 def update_google_sheet(sheet_id, worksheet_name, matched_jobs):
-    """Appends new matched jobs to Google Sheet and deduplicates by URL."""
     gc = get_google_sheet_client()
     if not gc:
         return 0, set()
@@ -256,20 +317,20 @@ def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top
 
     if new_jobs_count > 0:
         msg = f"🔍 *Embedded Job Search Alert*\n"
-        msg += f"Scanned *{total_raw_count}* postings across APIs.\n"
-        msg += f"Found *{new_jobs_count}* new matching jobs for your profile!\n\n"
-        msg += "*Top Matching Roles:*\n"
+        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Naukri, Indeed & Wellfound.\n"
+        msg += f"Found *{new_jobs_count}* new Embedded/Firmware/Linux matching jobs!\n\n"
+        msg += "*Top Roles Added to Sheet:*\n"
 
         for i, job in enumerate(top_jobs[:5], 1):
-            msg += f"{i}. [{job['title']}]({job['link']}) @ *{job['company']}*\n"
+            msg += f"{i}. [{job['title']}]({job['link']}) @ *{job['company']}* ({job['source']})\n"
             msg += f"   📍 {job['location']} | Match Score: `{job['score']}`\n"
 
         if sheet_url:
             msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
     else:
-        msg = f"✅ *Job Search Execution Complete*\n"
-        msg += f"Scanned *{total_raw_count}* postings across APIs.\n"
-        msg += f"No new Embedded/Linux/Systems jobs matched this batch. Your tracker is up to date!\n"
+        msg = f"✅ *Embedded Job Search Execution Complete*\n"
+        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Naukri, Indeed & Wellfound.\n"
+        msg += f"No new Embedded roles found in this run. Your sheet is up to date!\n"
         if sheet_url:
             msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
 
@@ -291,6 +352,9 @@ def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top
         with urllib.request.urlopen(req, timeout=10) as response:
             if response.status == 200:
                 print("Telegram notification sent successfully!")
+            else:
+                body = response.read().decode('utf-8')
+                print(f"Telegram error response: {body}")
     except Exception as e:
         print(f"Error sending Telegram notification: {e}")
 
@@ -306,22 +370,23 @@ def main():
     inc_kw = config.get("include_keywords", [])
     exc_kw = config.get("exclude_keywords", [])
 
-    # 1. Fetch raw jobs
+    # 1. Fetch raw jobs specifically from LinkedIn, Naukri, Indeed, Instahyre/Wellfound
     raw_jobs = []
-    raw_jobs.extend(fetch_remoteok_jobs())
-    raw_jobs.extend(fetch_remotive_jobs())
-    raw_jobs.extend(fetch_hn_jobs())
+    raw_jobs.extend(fetch_linkedin_jobs())
+    raw_jobs.extend(fetch_naukri_jobs())
+    raw_jobs.extend(fetch_indeed_jobs())
+    raw_jobs.extend(fetch_instahyre_wellfound_jobs())
 
     total_raw_count = len(raw_jobs)
     print(f"Total raw jobs fetched: {total_raw_count}")
 
-    # 2. Filter & score
+    # 2. Filter & score with strict Embedded Domain rules
     matched_jobs = []
     for j in raw_jobs:
         link = j["link"].strip()
 
         score, matches = calculate_match_score(j["title"], j["full_text"], inc_kw, exc_kw)
-        if score >= 10:  # Include match score threshold
+        if score > 0:
             job_entry = {
                 "Date Added": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "Source": j["source"],
@@ -336,17 +401,17 @@ def main():
             matched_jobs.append(job_entry)
 
     matched_jobs.sort(key=lambda x: x["Match Score"], reverse=True)
-    print(f"Matching embedded/systems roles filtered: {len(matched_jobs)}")
+    print(f"Strict Embedded field roles matched: {len(matched_jobs)}")
 
     # 3. Update Google Sheet
     added_count = 0
     if sheet_id and sheet_id != "YOUR_SPREADSHEET_ID_HERE":
         added_count, _ = update_google_sheet(sheet_id, worksheet_name, matched_jobs)
     else:
-        print("Notice: SPREADSHEET_ID not set in env or config.")
+        print("Notice: SPREADSHEET_ID not set in env.")
         added_count = len(matched_jobs)
 
-    # 4. Telegram Alert (Always send ping so user gets execution feedback!)
+    # 4. Telegram Alert
     if telegram_token and telegram_token != "YOUR_TELEGRAM_BOT_TOKEN":
         top_jobs = [
             {
@@ -354,7 +419,8 @@ def main():
                 "company": j["Company"],
                 "location": j["Location"],
                 "link": j["Link"],
-                "score": j["Match Score"]
+                "score": j["Match Score"],
+                "source": j["Source"]
             }
             for j in matched_jobs
         ]
