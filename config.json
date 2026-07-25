@@ -1,0 +1,53 @@
+{
+    "target_roles": [
+        "Embedded Engineer",
+        "Firmware Engineer",
+        "Embedded Linux Developer",
+        "Embedded Developer",
+        "Systems Engineer",
+        "C++ Developer",
+        "Low-Level Software Engineer"
+    ],
+    "include_keywords": [
+        "embedded",
+        "firmware",
+        "embedded linux",
+        "c++",
+        "microcontroller",
+        "rtos",
+        "freeRTOS",
+        "uart",
+        "i2c",
+        "spi",
+        "can bus",
+        "can protocol",
+        "device driver",
+        "kernel",
+        "system call",
+        "posix",
+        "gdb",
+        "cmake",
+        "pic18f4580",
+        "low-level"
+    ],
+    "exclude_keywords": [
+        "senior staff",
+        "lead architect",
+        "director",
+        "principal",
+        "10+ years",
+        "manager",
+        "3d modeller",
+        "designer",
+        "teachers"
+    ],
+    "google_sheets": {
+        "spreadsheet_id": "YOUR_SPREADSHEET_ID_HERE",
+        "worksheet_name": "Job Tracker"
+    },
+    "telegram": {
+        "enabled": true,
+        "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+        "chat_id": "YOUR_TELEGRAM_CHAT_ID"
+    }
+}
