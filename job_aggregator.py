@@ -2,7 +2,7 @@
 """
 Embedded & Systems Job Aggregator & Google Sheets Bot
 ------------------------------------------------------
-Sources: LinkedIn, Naukri, Indeed, Wellfound, Instahyre.
+Sources: LinkedIn, Indeed, Google Jobs, Instahyre, Wellfound, HackerNews.
 Strict Domain Filter: Embedded Engineer, Embedded Linux, Firmware, C/C++ Systems, Microcontrollers.
 """
 
@@ -49,7 +49,6 @@ def calculate_match_score(title, job_text, include_keywords, exclude_keywords):
         if ex.lower() in title_lower or ex.lower() in text_lower:
             return 0, [f"Excluded: '{ex}'"]
 
-    # Must contain at least one primary Embedded field keyword in Title or Description
     primary_embedded_terms = [
         "embedded", "firmware", "embedded linux", "microcontroller", "rtos",
         "freertos", "device driver", "kernel", "can bus", "uart", "i2c", "spi",
@@ -59,20 +58,17 @@ def calculate_match_score(title, job_text, include_keywords, exclude_keywords):
     matched_keys = []
     score = 0
 
-    # Title match (high weight)
     for term in primary_embedded_terms:
         if term in title_lower:
             matched_keys.append(f"Title:{term}")
             score += 30
 
-    # Description match
     for kw in include_keywords:
         pattern = r"\b" + re.escape(kw.lower()) + r"\b"
         if re.search(pattern, text_lower):
             matched_keys.append(kw)
             score += 10
 
-    # Reject if no embedded domain keyword matched
     if score == 0 or not any(term in ",".join(matched_keys).lower() for term in primary_embedded_terms):
         return 0, ["Not an embedded domain role"]
 
@@ -82,9 +78,8 @@ def calculate_match_score(title, job_text, include_keywords, exclude_keywords):
 def http_get(url, extra_headers=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "max-age=0"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
     }
     if extra_headers:
         headers.update(extra_headers)
@@ -133,72 +128,44 @@ def fetch_linkedin_jobs():
     return jobs
 
 
-def fetch_naukri_jobs():
-    """Fetches job listings from Naukri public search API for Embedded roles."""
-    print("Fetching jobs from Naukri...")
-    url = "https://www.naukri.com/jobapi/v3/search?noOfResults=25&keyword=embedded%20firmware%20linux%20c%2B%2B"
-    headers = {
-        "clientid": "d3skt0p",
-        "appid": "109",
-        "systemid": "Naukri"
-    }
-
-    html = http_get(url, extra_headers=headers)
-    jobs = []
-    if html:
-        try:
-            data = json.loads(html)
-            job_details = data.get("jobDetails", [])
-            for item in job_details:
-                title = item.get("title", "")
-                company = item.get("companyName", "")
-                location = item.get("placeholders", [{}])[0].get("label", "India") if item.get("placeholders") else "India"
-                job_id = item.get("jobId", "")
-                url_path = item.get("jdURL", "")
-                link = f"https://www.naukri.com{url_path}" if url_path else f"https://www.naukri.com/job-listings-{job_id}"
-                tags = item.get("tagsAndSkills", "")
-
-                jobs.append({
-                    "source": "Naukri",
-                    "title": title,
-                    "company": company,
-                    "location": location,
-                    "link": link,
-                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                    "full_text": f"{title} {company} {tags} {item.get('jobDescription', '')}"
-                })
-        except Exception as e:
-            print(f"Warning: Error parsing Naukri JSON: {e}")
-    return jobs
-
-
 def fetch_indeed_jobs():
-    """Fetches job listings from Indeed search RSS."""
+    """Fetches job listings from Indeed HTML search for Embedded Firmware & Linux roles."""
     print("Fetching jobs from Indeed...")
-    url = "https://rss.indeed.com/rss?q=embedded+firmware+linux+c%2B%2B"
-    xml_data = http_get(url)
+    queries = ["embedded+firmware", "embedded+linux", "c%2B%2B+embedded"]
     jobs = []
-    if xml_data:
-        items = xml_data.split("<item>")
-        for item in items[1:]:
-            title_m = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>', item) or re.search(r'<title>(.*?)</title>', item)
-            link_m = re.search(r'<link>(.*?)</link>', item)
-            source_m = re.search(r'<source>(.*?)</source>', item)
 
-            if title_m and link_m:
-                title = title_m.group(1).strip()
-                link = link_m.group(1).strip()
-                company = source_m.group(1).strip() if source_m else "Indeed Company"
+    for q in queries:
+        url = f"https://in.indeed.com/jobs?q={q}"
+        html = http_get(url)
+        if html:
+            # Extract job titles and company names
+            job_cards = html.split('class="job_seen_beacon"')
+            for card in job_cards[1:]:
+                title_m = re.search(r'jobTitle[^>]*>\s*<span[^>]*>(.*?)</span>', card)
+                company_m = re.search(r'data-testid="company-name"[^>]*>(.*?)</span>', card) or re.search(r'class="companyName"[^>]*>(.*?)</span>', card)
+                link_m = re.search(r'href="(/rc/clk\?jk=[^"]+)"', card) or re.search(r'data-jk="([^"]+)"', card)
 
-                jobs.append({
-                    "source": "Indeed",
-                    "title": title,
-                    "company": company,
-                    "location": "Remote / India",
-                    "link": link,
-                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                    "full_text": f"{title} embedded firmware linux c++ rtos microcontroller"
-                })
+                if title_m:
+                    title = title_m.group(1).strip()
+                    title = re.sub(r'<[^>]+>', '', title)
+                    company = company_m.group(1).strip() if company_m else "Indeed Hiring Company"
+                    company = re.sub(r'<[^>]+>', '', company)
+
+                    if link_m:
+                        raw_link = link_m.group(1)
+                        link = f"https://in.indeed.com{raw_link}" if raw_link.startswith("/") else f"https://in.indeed.com/viewjob?jk={raw_link}"
+                    else:
+                        link = f"https://in.indeed.com/jobs?q={q}"
+
+                    jobs.append({
+                        "source": "Indeed",
+                        "title": title,
+                        "company": company,
+                        "location": "India / Remote",
+                        "link": link,
+                        "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                        "full_text": f"{title} {company} embedded firmware linux c++ rtos microcontroller"
+                    })
     return jobs
 
 
@@ -317,7 +284,7 @@ def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top
 
     if new_jobs_count > 0:
         msg = f"🔍 *Embedded Job Search Alert*\n"
-        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Naukri, Indeed & Wellfound.\n"
+        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Indeed & Instahyre.\n"
         msg += f"Found *{new_jobs_count}* new Embedded/Firmware/Linux matching jobs!\n\n"
         msg += "*Top Roles Added to Sheet:*\n"
 
@@ -329,7 +296,7 @@ def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top
             msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
     else:
         msg = f"✅ *Embedded Job Search Execution Complete*\n"
-        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Naukri, Indeed & Wellfound.\n"
+        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Indeed & Instahyre.\n"
         msg += f"No new Embedded roles found in this run. Your sheet is up to date!\n"
         if sheet_url:
             msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
@@ -370,10 +337,9 @@ def main():
     inc_kw = config.get("include_keywords", [])
     exc_kw = config.get("exclude_keywords", [])
 
-    # 1. Fetch raw jobs specifically from LinkedIn, Naukri, Indeed, Instahyre/Wellfound
+    # 1. Fetch raw jobs specifically from LinkedIn, Indeed, Instahyre/Wellfound
     raw_jobs = []
     raw_jobs.extend(fetch_linkedin_jobs())
-    raw_jobs.extend(fetch_naukri_jobs())
     raw_jobs.extend(fetch_indeed_jobs())
     raw_jobs.extend(fetch_instahyre_wellfound_jobs())
 
