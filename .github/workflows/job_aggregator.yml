@@ -2,8 +2,8 @@ name: Embedded Job Aggregator & Alert Bot
 
 on:
   schedule:
-    # Runs twice daily at 9:00 AM IST (03:30 UTC) and 6:00 PM IST (12:30 UTC)
-    - cron: '30 3,12 * * *'
+    # Runs 6 times a day (every 4 hours at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+    - cron: '0 */4 * * *'
   workflow_dispatch: # Allows 1-tap manual execution from your phone via GitHub app/web
 
 jobs:

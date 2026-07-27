@@ -2,7 +2,7 @@
 """
 Embedded & Systems Job Aggregator & Google Sheets Bot
 ------------------------------------------------------
-Sources: LinkedIn, Indeed, Google Jobs, Instahyre, Wellfound, HackerNews.
+Sources: LinkedIn, Instahyre, HackerNews, Remotive.
 Strict Domain Filter: Embedded Engineer, Embedded Linux, Firmware, C/C++ Systems, Microcontrollers.
 """
 
@@ -128,52 +128,82 @@ def fetch_linkedin_jobs():
     return jobs
 
 
-def fetch_indeed_jobs():
-    """Fetches job listings from Indeed HTML search for Embedded Firmware & Linux roles."""
-    print("Fetching jobs from Indeed...")
-    queries = ["embedded+firmware", "embedded+linux", "c%2B%2B+embedded"]
+def fetch_instahyre_jobs():
+    """Fetches real job listings from Instahyre's public API for Embedded & Firmware roles."""
+    print("Fetching jobs from Instahyre...")
+    designations = ["Embedded", "Firmware", "Embedded Linux", "Microcontroller", "C++ Developer", "Systems Engineer"]
     jobs = []
+    seen_urls = set()
 
-    for q in queries:
-        url = f"https://in.indeed.com/jobs?q={q}"
-        html = http_get(url)
-        if html:
-            # Extract job titles and company names
-            job_cards = html.split('class="job_seen_beacon"')
-            for card in job_cards[1:]:
-                title_m = re.search(r'jobTitle[^>]*>\s*<span[^>]*>(.*?)</span>', card)
-                company_m = re.search(r'data-testid="company-name"[^>]*>(.*?)</span>', card) or re.search(r'class="companyName"[^>]*>(.*?)</span>', card)
-                link_m = re.search(r'href="(/rc/clk\?jk=[^"]+)"', card) or re.search(r'data-jk="([^"]+)"', card)
+    for des in designations:
+        url = f"https://www.instahyre.com/api/v1/job_search?designation={urllib.parse.quote(des)}"
+        data = http_get(url, extra_headers={"Accept": "application/json"})
+        if data:
+            try:
+                parsed = json.loads(data)
+                for item in parsed.get("objects", []):
+                    public_url = item.get("public_url", "").strip()
+                    if not public_url or public_url in seen_urls:
+                        continue
+                    seen_urls.add(public_url)
 
-                if title_m:
-                    title = title_m.group(1).strip()
-                    title = re.sub(r'<[^>]+>', '', title)
-                    company = company_m.group(1).strip() if company_m else "Indeed Hiring Company"
-                    company = re.sub(r'<[^>]+>', '', company)
-
-                    if link_m:
-                        raw_link = link_m.group(1)
-                        link = f"https://in.indeed.com{raw_link}" if raw_link.startswith("/") else f"https://in.indeed.com/viewjob?jk={raw_link}"
-                    else:
-                        link = f"https://in.indeed.com/jobs?q={q}"
+                    title = item.get("title", "").strip()
+                    employer = item.get("employer", {}) if isinstance(item.get("employer"), dict) else {}
+                    company = employer.get("company_name", "").strip() or "Instahyre Hiring Company"
+                    location = item.get("locations", "").strip() or "India"
+                    keywords = item.get("keywords", [])
+                    kw_str = " ".join(keywords) if isinstance(keywords, list) else str(keywords)
 
                     jobs.append({
-                        "source": "Indeed",
+                        "source": "Instahyre",
                         "title": title,
                         "company": company,
-                        "location": "India / Remote",
-                        "link": link,
+                        "location": location,
+                        "link": public_url,
                         "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                        "full_text": f"{title} {company} embedded firmware linux c++ rtos microcontroller"
+                        "full_text": f"{title} {company} {location} {kw_str} embedded firmware linux c++ rtos microcontroller"
                     })
+            except Exception as e:
+                print(f"Warning parsing Instahyre response for '{des}': {e}")
     return jobs
 
 
-def fetch_instahyre_wellfound_jobs():
-    """Fetches jobs from Instahyre / Wellfound tech job queries."""
-    print("Fetching jobs from Instahyre & Wellfound search feeds...")
+def fetch_hackernews_jobs():
+    """Fetches embedded tech job postings from HackerNews (Who is Hiring) via Algolia API."""
+    print("Fetching jobs from HackerNews (Who is Hiring)...")
+    url = "https://hn.algolia.com/api/v1/search?query=embedded&tags=comment"
+    data = http_get(url, extra_headers={"Accept": "application/json"})
+    jobs = []
+    if data:
+        try:
+            parsed = json.loads(data)
+            for item in parsed.get("hits", []):
+                comment_text = item.get("comment_text", "")
+                object_id = item.get("objectID", "")
+                link = f"https://news.ycombinator.com/item?id={object_id}"
+
+                clean_text = re.sub(r'<[^>]+>', ' ', comment_text)
+                first_line = clean_text.strip().split("\n")[0][:100]
+
+                jobs.append({
+                    "source": "HackerNews",
+                    "title": first_line or "Embedded Engineer Role",
+                    "company": "HN Startup / Tech Company",
+                    "location": "Remote / Tech Hub",
+                    "link": link,
+                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                    "full_text": clean_text
+                })
+        except Exception as e:
+            print(f"Warning parsing HackerNews response: {e}")
+    return jobs
+
+
+def fetch_remotive_jobs():
+    """Fetches remote embedded jobs from Remotive API."""
+    print("Fetching jobs from Remotive Remote API...")
     url = "https://remotive.com/api/remote-jobs?search=embedded"
-    data = http_get(url)
+    data = http_get(url, extra_headers={"Accept": "application/json"})
     jobs = []
     if data:
         try:
@@ -182,19 +212,19 @@ def fetch_instahyre_wellfound_jobs():
                 title = item.get("title", "")
                 company = item.get("company_name", "")
                 link = item.get("url", "")
-                desc = item.get("description", "")
+                desc = re.sub(r'<[^>]+>', ' ', item.get("description", ""))
 
                 jobs.append({
-                    "source": "Instahyre/Wellfound",
+                    "source": "Remotive",
                     "title": title,
                     "company": company,
                     "location": item.get("candidate_required_location", "Remote"),
                     "link": link,
                     "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                    "full_text": f"{title} {desc}"
+                    "full_text": f"{title} {company} {desc}"
                 })
         except Exception as e:
-            print(f"Warning parsing feed: {e}")
+            print(f"Warning parsing Remotive response: {e}")
     return jobs
 
 
@@ -284,7 +314,7 @@ def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top
 
     if new_jobs_count > 0:
         msg = f"🔍 *Embedded Job Search Alert*\n"
-        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Indeed & Instahyre.\n"
+        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Instahyre, HackerNews & Remotive.\n"
         msg += f"Found *{new_jobs_count}* new Embedded/Firmware/Linux matching jobs!\n\n"
         msg += "*Top Roles Added to Sheet:*\n"
 
@@ -296,7 +326,7 @@ def send_telegram_alert(bot_token, chat_id, total_raw_count, new_jobs_count, top
             msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
     else:
         msg = f"✅ *Embedded Job Search Execution Complete*\n"
-        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Indeed & Instahyre.\n"
+        msg += f"Scanned *{total_raw_count}* postings across LinkedIn, Instahyre, HackerNews & Remotive.\n"
         msg += f"No new Embedded roles found in this run. Your sheet is up to date!\n"
         if sheet_url:
             msg += f"\n📊 [**Open Google Sheets Tracker**]({sheet_url})"
@@ -337,11 +367,12 @@ def main():
     inc_kw = config.get("include_keywords", [])
     exc_kw = config.get("exclude_keywords", [])
 
-    # 1. Fetch raw jobs specifically from LinkedIn, Indeed, Instahyre/Wellfound
+    # 1. Fetch raw jobs specifically from LinkedIn, Instahyre, HackerNews, & Remotive
     raw_jobs = []
     raw_jobs.extend(fetch_linkedin_jobs())
-    raw_jobs.extend(fetch_indeed_jobs())
-    raw_jobs.extend(fetch_instahyre_wellfound_jobs())
+    raw_jobs.extend(fetch_instahyre_jobs())
+    raw_jobs.extend(fetch_hackernews_jobs())
+    raw_jobs.extend(fetch_remotive_jobs())
 
     total_raw_count = len(raw_jobs)
     print(f"Total raw jobs fetched: {total_raw_count}")
