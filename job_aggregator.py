@@ -34,43 +34,53 @@ def load_config():
 
 
 def calculate_match_score(title, job_text, include_keywords, exclude_keywords):
-    """Strict Embedded domain matching. Rejects non-embedded roles (DevOps, AI, Web, etc.)."""
+    """Strict Embedded domain matching. Rejects non-embedded roles (DevOps, Data Analyst, Web, AI, etc.)."""
     text_lower = job_text.lower()
     title_lower = title.lower()
 
-    # Mandatory Exclude list for non-embedded roles
+    # Comprehensive Exclude list for non-embedded roles
     strict_excludes = [
-        "devops", "ai engineer", "frontend", "backend web", "fullstack", "react",
-        "3d modeller", "designer", "sales", "marketing", "data scientist", "manager",
-        "senior staff", "lead architect", "director", "principal"
-    ] + exclude_keywords
+        "data analyst", "data engineer", "business analyst", "data scientist", "data science",
+        "analyst", "qa analyst", "qa engineer", "test engineer", "software test",
+        "react", "angular", "vue", "node", "java developer", "python developer", "web developer",
+        "devops", "cloud", "frontend", "backend", "full stack", "fullstack", "ui/ux",
+        "hr", "human resources", "recruiter", "sales", "marketing", "finance", "accountant",
+        "scrum master", "product manager", "project manager", "business development",
+        "3d modeller", "designer", "teachers", "senior staff", "lead architect", "director", "principal",
+        "video editor", "ai engineer", "ai specialist", "cinematic"
+    ] + [ex.lower() for ex in exclude_keywords]
 
     for ex in strict_excludes:
-        if ex.lower() in title_lower or ex.lower() in text_lower:
-            return 0, [f"Excluded: '{ex}'"]
+        if ex in title_lower:
+            return 0, [f"Excluded title term: '{ex}'"]
 
     primary_embedded_terms = [
         "embedded", "firmware", "embedded linux", "microcontroller", "rtos",
         "freertos", "device driver", "kernel", "can bus", "uart", "i2c", "spi",
-        "bare metal", "c++ developer", "c developer", "low-level", "pic18f4580"
+        "bare metal", "c++ developer", "c developer", "low-level", "pic18f4580",
+        "board support", "bsp", "soc", "fpga", "dsp"
     ]
 
     matched_keys = []
     score = 0
 
+    title_matched = False
     for term in primary_embedded_terms:
         if term in title_lower:
             matched_keys.append(f"Title:{term}")
             score += 30
+            title_matched = True
 
-    for kw in include_keywords:
-        pattern = r"\b" + re.escape(kw.lower()) + r"\b"
-        if re.search(pattern, text_lower):
-            matched_keys.append(kw)
-            score += 10
+    if title_matched:
+        for kw in include_keywords:
+            pattern = r"\b" + re.escape(kw.lower()) + r"\b"
+            if re.search(pattern, text_lower):
+                matched_keys.append(kw)
+                score += 10
 
-    if score == 0 or not any(term in ",".join(matched_keys).lower() for term in primary_embedded_terms):
-        return 0, ["Not an embedded domain role"]
+    # Strict requirement: Job title MUST explicitly match embedded domain
+    if not title_matched or score < 30:
+        return 0, ["Title does not match embedded engineering domain"]
 
     return score, matched_keys
 
@@ -123,7 +133,7 @@ def fetch_linkedin_jobs():
                     "location": location,
                     "link": link,
                     "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                    "full_text": f"{title} {company} {location} embedded firmware linux c++ rtos microcontroller"
+                    "full_text": f"{title} {company} {location}"
                 })
     return jobs
 
@@ -161,7 +171,7 @@ def fetch_instahyre_jobs():
                         "location": location,
                         "link": public_url,
                         "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                        "full_text": f"{title} {company} {location} {kw_str} embedded firmware linux c++ rtos microcontroller"
+                        "full_text": f"{title} {company} {location} {kw_str}"
                     })
             except Exception as e:
                 print(f"Warning parsing Instahyre response for '{des}': {e}")
@@ -171,7 +181,7 @@ def fetch_instahyre_jobs():
 def fetch_hackernews_jobs():
     """Fetches embedded tech job postings from HackerNews (Who is Hiring) via Algolia API."""
     print("Fetching jobs from HackerNews (Who is Hiring)...")
-    url = "https://hn.algolia.com/api/v1/search?query=embedded&tags=comment"
+    url = "https://hn.algolia.com/api/v1/search?query=embedded+hiring&tags=comment"
     data = http_get(url, extra_headers={"Accept": "application/json"})
     jobs = []
     if data:
@@ -183,17 +193,19 @@ def fetch_hackernews_jobs():
                 link = f"https://news.ycombinator.com/item?id={object_id}"
 
                 clean_text = re.sub(r'<[^>]+>', ' ', comment_text)
-                first_line = clean_text.strip().split("\n")[0][:100]
+                first_line = clean_text.strip().split("\n")[0][:120]
+                first_line_lower = first_line.lower()
 
-                jobs.append({
-                    "source": "HackerNews",
-                    "title": first_line or "Embedded Engineer Role",
-                    "company": "HN Startup / Tech Company",
-                    "location": "Remote / Tech Hub",
-                    "link": link,
-                    "date_posted": datetime.now().strftime("%Y-%m-%d"),
-                    "full_text": clean_text
-                })
+                if any(k in first_line_lower for k in ["embedded", "firmware", "microcontroller", "hardware", "rtos", "bsp"]):
+                    jobs.append({
+                        "source": "HackerNews",
+                        "title": first_line,
+                        "company": "HN Startup / Tech Company",
+                        "location": "Remote / Tech Hub",
+                        "link": link,
+                        "date_posted": datetime.now().strftime("%Y-%m-%d"),
+                        "full_text": clean_text
+                    })
         except Exception as e:
             print(f"Warning parsing HackerNews response: {e}")
     return jobs
@@ -266,17 +278,21 @@ def update_google_sheet(sheet_id, worksheet_name, matched_jobs):
             worksheet = sh.add_worksheet(title=worksheet_name, rows=1000, cols=10)
 
         existing_data = worksheet.get_all_values()
-        headers = ["Date Added", "Source", "Job Title", "Company", "Location", "Match Score", "Matched Keywords", "Link", "Status"]
+        headers = ["Date Added", "Source", "Job Title", "Location", "Match Score", "Matched Keywords", "Link", "Status", "Company Name"]
 
         if not existing_data:
-            worksheet.append_row(headers)
+            worksheet.append_row(headers, table_range="A1", value_input_option="USER_ENTERED")
             existing_links = set()
         else:
             header_row = existing_data[0]
-            link_col_idx = 7
-            if "Link" in header_row:
-                link_col_idx = header_row.index("Link")
+            link_col_idx = header_row.index("Link") if "Link" in header_row else 6
             existing_links = {row[link_col_idx].strip() for row in existing_data[1:] if len(row) > link_col_idx}
+
+            if "Company Name" not in header_row:
+                try:
+                    worksheet.update(range_name="A1:I1", values=[headers], value_input_option="USER_ENTERED")
+                except Exception as e:
+                    print(f"Warning updating headers: {e}")
 
         new_rows = []
         for j in matched_jobs:
@@ -285,17 +301,17 @@ def update_google_sheet(sheet_id, worksheet_name, matched_jobs):
                     j["Date Added"],
                     j["Source"],
                     j["Job Title"],
-                    j["Company"],
                     j["Location"],
                     j["Match Score"],
                     j["Matched Keywords"],
                     j["Link"],
-                    j["Status"]
+                    j["Status"],
+                    j["Company"]  # Company Name in the last column
                 ])
                 existing_links.add(j["Link"])
 
         if new_rows:
-            worksheet.append_rows(new_rows)
+            worksheet.append_rows(new_rows, table_range="A1", value_input_option="USER_ENTERED")
             print(f"✅ Added {len(new_rows)} new rows to Google Sheet '{worksheet_name}'.")
 
         return len(new_rows), existing_links
